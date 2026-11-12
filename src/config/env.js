@@ -35,9 +35,12 @@ module.exports = {
     accountUrl: process.env.ACCOUNT_URL || (process.env.FRONTEND_PUBLIC_URL ? `${process.env.FRONTEND_PUBLIC_URL.replace(/\/+$/, "")}/welcome` : ""),
   },
 
+  // Brevo is the only email provider. The key and sender details are read from the environment (see mailer.js).
   email: {
-    user: process.env.EMAIL_USER,
-    appPassword: process.env.EMAIL_APP_PASSWORD,
+    brevoApiKey: process.env.BREVO_API_KEY,
+    senderEmail: process.env.BREVO_SENDER_EMAIL,
+    senderName: process.env.BREVO_SENDER_NAME || "Known-You Seed",
+    replyTo: process.env.REPLY_TO_EMAIL,
     feedbackTo: process.env.FEEDBACK_TO_EMAIL,
     incidentTo: process.env.INCIDENT_TO_EMAIL || process.env.FEEDBACK_TO_EMAIL,
   },

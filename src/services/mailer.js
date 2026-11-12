@@ -1,9 +1,8 @@
 const dns = require("dns");
-const nodemailer = require("nodemailer");
 const { escapeHtml } = require("../utils/validate");
-const { createHttpMailTransport } = require("./httpMailTransport");
+const { createBrevoTransport } = require("./httpMailTransport");
 
-// Cloud servers often have no working IPv6 route; connecting to Gmail over IPv6 then fails with ENETUNREACH
+// Cloud servers often have no working IPv6 route; prefer IPv4 so the call to Brevo never fails with ENETUNREACH
 try {
   dns.setDefaultResultOrder("ipv4first");
 } catch {
@@ -36,128 +35,100 @@ function detailsTable(rows) {
 }
 
 /**
- * Gmail SMTP that always connects over IPv4. Some servers have no IPv6 route and fail with
- * "connect ENETUNREACH 2607:f8b0:..." when the name resolves to an IPv6 address.
- * (A host that blocks SMTP altogether - Render, Railway ... - still needs RESEND_API_KEY / BREVO_API_KEY.)
+ * Brevo is the only email provider. Everything comes from environment variables:
+ *   BREVO_API_KEY       Brevo API key (starts with xkeysib-)
+ *   BREVO_SENDER_EMAIL  verified sender address (From)
+ *   BREVO_SENDER_NAME   name shown in From (default "Known-You Seed")
+ *   REPLY_TO_EMAIL      Reply-To address of the emails
  */
-function createGmailTransport({ user, appPassword }) {
-  const HOST = "smtp.gmail.com";
-  let cached = null;
+/** Removes spaces, line breaks and quotes that often get pasted around a value (e.g. KEY="abc"). */
+const clean = (value) => String(value || "").trim().replace(/^["'`]+|["'`]+$/g, "").trim();
 
-  const make = (host, extra = {}) =>
-    nodemailer.createTransport({
-      host,
-      port: 465,
-      secure: true,
-      auth: { user, pass: appPassword },
-      connectionTimeout: 20000,
-      greetingTimeout: 20000,
-      socketTimeout: 30000,
-      ...extra,
-    });
-
-  async function transporter() {
-    if (cached && cached.expires > Date.now()) return cached.value;
-    let value;
-    try {
-      const [ip] = await dns.promises.resolve4(HOST);
-      value = make(ip, { tls: { servername: HOST } }); // connect to the IPv4 address, check the certificate for the name
-    } catch {
-      value = make(HOST);
-    }
-    cached = { value, expires: Date.now() + 10 * 60 * 1000 };
-    return value;
-  }
-
-  return { sendMail: async (message) => (await transporter()).sendMail(message) };
-}
-
-/**
- * How the emails are sent (first one that is configured wins):
- *  1. RESEND_API_KEY -> Resend over HTTPS      (works on every host)
- *  2. BREVO_API_KEY  -> Brevo over HTTPS       (works on every host)
- *  3. otherwise      -> Gmail SMTP with EMAIL_USER + EMAIL_APP_PASSWORD (blocked by some hosts)
- * For 1 and 2 set EMAIL_FROM to a sender address that is verified in that service.
- */
-/** Removes spaces, line breaks and quotes that often get pasted around a key (e.g. KEY="abc"). */
-const cleanKey = (value) => String(value || "").trim().replace(/^["'`]+|["'`]+$/g, "").trim();
-
-function pickTransport({ user, appPassword }) {
-  const resendKey = cleanKey(process.env.RESEND_API_KEY);
-  const brevoKey = cleanKey(process.env.BREVO_API_KEY);
-  if (brevoKey && !brevoKey.startsWith("xkeysib-") && !brevoKey.startsWith("xsmtpsib-")) {
-    console.warn(
-      `WARNING: BREVO_API_KEY starts with "${brevoKey.slice(0, 9)}" but a Brevo API key starts with exactly xkeysib- . ` +
-        "Check the start of the value in the server environment for an extra or missing character."
-    );
-  }
-  if (brevoKey.startsWith("xsmtpsib-")) {
-    console.warn(
-      "WARNING: BREVO_API_KEY looks like an SMTP key (it starts with xsmtpsib-). The email API needs an API key " +
-        "(it starts with xkeysib-). In Brevo open SMTP & API > API Keys and generate a new API key."
-    );
-  }
-  // Only the start and the last 4 characters are printed, enough to compare with the key list in the email service
-  const hint = (key) => `${key.slice(0, key.indexOf("-") + 1 || 4)}...${key.slice(-4)} (${key.length} characters)`;
-  if (resendKey) return { name: `Resend (HTTPS), key ${hint(resendKey)}`, http: true, transport: createHttpMailTransport("resend", resendKey) };
-  if (brevoKey) return { name: `Brevo (HTTPS), key ${hint(brevoKey)}`, http: true, transport: createHttpMailTransport("brevo", brevoKey) };
+function readBrevoConfig() {
   return {
-    name: "Gmail SMTP",
-    http: false,
-    transport: createGmailTransport({ user, appPassword }),
+    apiKey: clean(process.env.BREVO_API_KEY),
+    senderEmail: clean(process.env.BREVO_SENDER_EMAIL),
+    senderName: clean(process.env.BREVO_SENDER_NAME) || BRAND,
+    replyTo: clean(process.env.REPLY_TO_EMAIL),
   };
 }
 
-const NETWORK_ERRORS = /ETIMEDOUT|ECONNECTION|ESOCKET|ENETUNREACH|EHOSTUNREACH|ECONNREFUSED|ECONNRESET|EAI_AGAIN|Connection timeout/i;
+/** Only the start and the last 4 characters are printed, enough to compare with the key list in Brevo. */
+const keyHint = (key) => `${key.slice(0, key.indexOf("-") + 1 || 4)}...${key.slice(-4)} (${key.length} characters)`;
 
-function createMailer({ user, appPassword, feedbackTo, incidentTo, transport, company = {} }) {
-  const companyInfo = { ...DEFAULT_COMPANY, ...Object.fromEntries(Object.entries(company).filter(([, v]) => v)) };
-  const picked = transport ? { name: "custom transport", http: false, transport } : pickTransport({ user, appPassword });
-  const transporter = picked.transport;
-  if (!transport) {
-    console.log(`Email: sending through ${picked.name}`);
-    if (!picked.http && process.env.RENDER) {
-      console.warn(
-        "WARNING: this server runs on Render, which blocks outgoing SMTP (Gmail), so emails will NOT be sent. " +
-          "Add BREVO_API_KEY (or RESEND_API_KEY) and EMAIL_FROM in Render > Environment and redeploy."
-      );
-    }
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+/** Prints every configuration problem once at start-up (the server still starts; sending then fails with a clear error). */
+function checkConfig(config) {
+  const problems = [];
+  if (!config.apiKey) problems.push("BREVO_API_KEY is not set");
+  else if (config.apiKey.startsWith("xsmtpsib-")) {
+    problems.push("BREVO_API_KEY is an SMTP key (xsmtpsib-). The email API needs an API key: Brevo > SMTP & API > API Keys (xkeysib-)");
+  } else if (!config.apiKey.startsWith("xkeysib-")) {
+    problems.push(`BREVO_API_KEY starts with "${config.apiKey.slice(0, 9)}" but a Brevo API key starts with xkeysib-`);
   }
+  if (!EMAIL_PATTERN.test(config.senderEmail)) problems.push("BREVO_SENDER_EMAIL is missing or not a valid address");
+  if (config.replyTo && !EMAIL_PATTERN.test(config.replyTo)) problems.push("REPLY_TO_EMAIL is not a valid address");
+  if (!config.replyTo) problems.push("REPLY_TO_EMAIL is not set (customers will not be able to reply to the sender mailbox)");
 
-  // The address shown in "From". Gmail always uses the logged-in account; Resend / Brevo need a verified sender.
-  const fromAddress = () => String(process.env.EMAIL_FROM || user || "").trim();
+  // Old providers are no longer used; point out variables that can now be deleted
+  const old = ["RESEND_API_KEY", "EMAIL_FROM", "EMAIL_USER", "EMAIL_APP_PASSWORD"].filter((name) => process.env[name]);
+  if (old.length) console.warn(`Email: ${old.join(", ")} ${old.length > 1 ? "are" : "is"} no longer used - you can delete ${old.length > 1 ? "them" : "it"} from the server environment.`);
+  problems.forEach((p) => console.warn(`Email WARNING: ${p}`));
+  return problems;
+}
+
+function createMailer({ feedbackTo, incidentTo, transport, company = {} } = {}) {
+  const companyInfo = { ...DEFAULT_COMPANY, ...Object.fromEntries(Object.entries(company).filter(([, v]) => v)) };
+  const config = readBrevoConfig();
+  const transporter = transport || (config.apiKey ? createBrevoTransport(config.apiKey) : null);
+
+  if (!transport) {
+    const problems = checkConfig(config);
+    console.log(
+      `Email: sending through Brevo API (HTTPS) as "${config.senderName}" <${config.senderEmail || "NOT SET"}>, ` +
+        `reply-to ${config.replyTo || "NOT SET"}, key ${config.apiKey ? keyHint(config.apiKey) : "NOT SET"}` +
+        (problems.length ? ` - ${problems.length} problem(s) above` : "")
+    );
+  }
 
   function ensureConfigured() {
     if (transport) return;
-    if (picked.http) {
-      if (!fromAddress()) {
-        throw new Error("EMAIL_FROM is not configured (use a sender address that is verified in your email service)");
-      }
-      return;
-    }
-    if (!user || !appPassword) {
-      throw new Error("EMAIL_USER / EMAIL_APP_PASSWORD are not configured");
-    }
+    if (!config.apiKey || !transporter) throw new Error("BREVO_API_KEY is not configured");
+    if (!EMAIL_PATTERN.test(config.senderEmail)) throw new Error("BREVO_SENDER_EMAIL is not configured (use the sender verified in Brevo)");
   }
 
+  /** Every email goes through here: sender and Reply-To come from the environment, result and errors are logged. */
   async function send(options) {
     ensureConfigured();
+    const started = Date.now();
+    const message = {
+      from: `"${config.senderName}" <${config.senderEmail}>`,
+      ...options,
+      // The company notifications set the customer as Reply-To; everything else falls back to REPLY_TO_EMAIL
+      replyTo: options.replyTo || config.replyTo || undefined,
+    };
     try {
-      return await transporter.sendMail({ from: `"${BRAND}" <${fromAddress()}>`, ...options });
+      const info = await transporter.sendMail(message);
+      console.log(
+        `Email sent through Brevo: "${options.subject}" to ${options.to} ` +
+          `(messageId ${(info && info.messageId) || "-"}, ${Date.now() - started} ms)`
+      );
+      return info;
     } catch (err) {
-      console.error(`Email to ${options.to} failed through ${picked.name} (${err.code || "error"}): ${err.message}`);
-      if (picked.http && (err.code === "HTTP_401" || err.code === "HTTP_403")) {
+      console.error(`Email FAILED: "${options.subject}" to ${options.to} (${err.code || "error"}): ${err.message}`);
+      if (err.code === "HTTP_401" || err.code === "HTTP_403") {
         console.error(
-          "Hint: the email service did not accept the key or the sender. Check that the key in the server environment is " +
-            "an API key (Brevo: xkeysib-...), copied completely and not deleted or expired, and that EMAIL_FROM is a sender " +
-            "you have verified in that service."
+          "Hint: Brevo did not accept the key. Check that BREVO_API_KEY is an API key (xkeysib-...), copied completely, " +
+            "not deleted, and that Brevo > Security > Authorised IPs is switched off (the server IP changes on Render)."
         );
-      }
-      if (!picked.http && NETWORK_ERRORS.test(`${err.code || ""} ${err.message}`)) {
+      } else if (err.code === "HTTP_400" && /sender/i.test(err.message)) {
         console.error(
-          "Hint: this server cannot reach Gmail. Many hosting services (Render, Railway, DigitalOcean ...) block SMTP. " +
-            "Set RESEND_API_KEY (or BREVO_API_KEY) and EMAIL_FROM in the server environment to send over HTTPS instead."
+          `Hint: Brevo does not accept the sender ${config.senderEmail}. Add and verify it under Brevo > Senders, ` +
+            "and make sure its domain is authenticated."
         );
+      } else if (err.code === "NETWORK_ERROR" || err.code === "TIMEOUT") {
+        console.error("Hint: the server could not reach api.brevo.com. Check the server's internet access and try again.");
       }
       throw err;
     }

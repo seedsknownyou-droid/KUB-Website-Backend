@@ -1,13 +1,14 @@
 /**
- * Sends email through a provider's HTTPS API (port 443) instead of SMTP.
+ * Sends email through the Brevo transactional API (HTTPS, port 443).
  *
- * Many hosting services (Render, Railway, DigitalOcean ...) block the SMTP ports 25 / 465 / 587, so
- * Gmail works on your own computer but every email times out on the deployed server. HTTPS is never blocked.
+ * HTTPS is used instead of SMTP because many hosting services (Render, Railway, DigitalOcean ...) block the
+ * SMTP ports 25 / 465 / 587. The object has a nodemailer-like sendMail() so mailer.js stays simple.
  *
- * It has the same sendMail() shape as a nodemailer transport, so mailer.js can use it without any other change.
- * Supported: Resend (RESEND_API_KEY) and Brevo (BREVO_API_KEY).
+ * Brevo is the only provider. Resend / Gmail SMTP have been removed.
  */
+const BREVO_URL = "https://api.brevo.com/v3/smtp/email";
 const REQUEST_TIMEOUT_MS = 20000;
+const RETRY_DELAY_MS = 800;
 
 /** '"Known-You Seed" <support@site.com>'  ->  { name, email } */
 function parseAddress(value) {
@@ -21,70 +22,74 @@ const list = (value) =>
     .map((item) => String(item).trim())
     .filter(Boolean);
 
-const PROVIDERS = {
-  resend: {
-    label: "Resend",
-    url: "https://api.resend.com/emails",
-    headers: (key) => ({ Authorization: `Bearer ${key}` }),
-    body: (msg) => {
-      const sender = parseAddress(msg.from);
-      return {
-        from: sender.name ? `${sender.name} <${sender.email}>` : sender.email,
-        to: list(msg.to),
-        subject: msg.subject,
-        html: msg.html,
-        text: msg.text,
-        ...(msg.replyTo ? { reply_to: msg.replyTo } : {}),
-      };
-    },
-  },
-  brevo: {
-    label: "Brevo",
-    url: "https://api.brevo.com/v3/smtp/email",
-    headers: (key) => ({ "api-key": key, accept: "application/json" }),
-    body: (msg) => {
-      const sender = parseAddress(msg.from);
-      return {
-        sender: { ...(sender.name ? { name: sender.name } : {}), email: sender.email },
-        to: list(msg.to).map((email) => ({ email })),
-        subject: msg.subject,
-        htmlContent: msg.html,
-        textContent: msg.text,
-        ...(msg.replyTo ? { replyTo: { email: msg.replyTo } } : {}),
-      };
-    },
-  },
-};
+function buildBody(msg) {
+  const sender = parseAddress(msg.from);
+  const replyTo = msg.replyTo ? parseAddress(msg.replyTo) : null;
+  return {
+    sender: { ...(sender.name ? { name: sender.name } : {}), email: sender.email },
+    to: list(msg.to).map((email) => ({ email })),
+    subject: msg.subject,
+    htmlContent: msg.html,
+    textContent: msg.text,
+    ...(replyTo && replyTo.email ? { replyTo: { email: replyTo.email, ...(replyTo.name ? { name: replyTo.name } : {}) } } : {}),
+    ...(msg.tags && msg.tags.length ? { tags: msg.tags } : {}),
+  };
+}
 
-function createHttpMailTransport(provider, apiKey, fetchImpl = (...args) => fetch(...args)) {
-  const config = PROVIDERS[provider];
-  if (!config) throw new Error(`Unknown email provider "${provider}"`);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Network problems, timeouts, rate limiting and Brevo server errors are worth one more try. */
+const isRetryable = (err) => err.retryable === true;
+
+function createBrevoTransport(apiKey, fetchImpl = (...args) => fetch(...args)) {
+  async function attempt(msg) {
+    let response;
+    try {
+      response = await fetchImpl(BREVO_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", accept: "application/json", "api-key": apiKey },
+        body: JSON.stringify(buildBody(msg)),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (cause) {
+      const timedOut = cause && (cause.name === "TimeoutError" || cause.name === "AbortError");
+      const err = new Error(timedOut ? "Brevo did not answer in time" : `Could not reach Brevo: ${cause && cause.message}`);
+      err.code = timedOut ? "TIMEOUT" : "NETWORK_ERROR";
+      err.retryable = true;
+      throw err;
+    }
+
+    const raw = await response.text();
+    let data = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      /* not JSON */
+    }
+
+    if (!response.ok) {
+      const reason = data.message || data.error || raw.slice(0, 200) || response.statusText;
+      const err = new Error(`Brevo rejected the email (HTTP ${response.status}${data.code ? `, ${data.code}` : ""}): ${reason}`);
+      err.code = `HTTP_${response.status}`;
+      err.brevoCode = data.code || "";
+      err.retryable = response.status === 429 || response.status >= 500;
+      throw err;
+    }
+    return { messageId: data.messageId || "", provider: "Brevo" };
+  }
 
   return {
     async sendMail(msg) {
-      const response = await fetchImpl(config.url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...config.headers(apiKey) },
-        body: JSON.stringify(config.body(msg)),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-
-      const raw = await response.text();
-      let data = {};
       try {
-        data = raw ? JSON.parse(raw) : {};
-      } catch {
-        /* not JSON */
+        return await attempt(msg);
+      } catch (err) {
+        if (!isRetryable(err)) throw err;
+        console.warn(`Brevo send failed (${err.code}), trying once more: ${err.message}`);
+        await sleep(RETRY_DELAY_MS);
+        return attempt(msg);
       }
-      if (!response.ok) {
-        const reason = data.message || data.error || raw.slice(0, 200) || response.statusText;
-        const err = new Error(`${config.label} rejected the email (HTTP ${response.status}): ${reason}`);
-        err.code = `HTTP_${response.status}`;
-        throw err;
-      }
-      return { messageId: data.id || data.messageId || "", provider: config.label };
     },
   };
 }
 
-module.exports = { createHttpMailTransport, parseAddress };
+module.exports = { createBrevoTransport, parseAddress, buildBody };
