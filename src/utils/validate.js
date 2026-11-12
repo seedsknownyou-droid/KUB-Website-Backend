@@ -1,5 +1,5 @@
 // Serial numbers are used as Firestore document IDs, so they must never contain "/" etc.
-const SERIAL_PATTERN = /^[A-Z0-9][A-Z0-9_-]{3,39}$/;
+const SERIAL_PATTERN = /^SN:PRI\d{8}$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 function normalizeSerial(value) {
