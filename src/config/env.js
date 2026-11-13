@@ -28,11 +28,12 @@ module.exports = {
     apiKey: process.env.FAST2SMS_API_KEY,
   },
 
-  // Printed in the customer emails. Leave empty to use the defaults from your sample emails.
+  // Printed in the customer emails. The "Access Your Account" link opens the Sign In (login) page of the website:
+  // <FRONTEND_PUBLIC_URL>/signin, or the full address in ACCOUNT_URL if you set one.
   company: {
     supportEmail: process.env.SUPPORT_EMAIL,
     supportPhone: process.env.SUPPORT_PHONE,
-    accountUrl: process.env.ACCOUNT_URL || (process.env.FRONTEND_PUBLIC_URL ? `${process.env.FRONTEND_PUBLIC_URL.replace(/\/+$/, "")}/welcome` : ""),
+    accountUrl: process.env.ACCOUNT_URL || (process.env.FRONTEND_PUBLIC_URL ? `${process.env.FRONTEND_PUBLIC_URL.replace(/\/+$/, "")}/signin` : ""),
   },
 
   // Brevo is the only email provider. The key and sender details are read from the environment (see mailer.js).
