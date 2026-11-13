@@ -1,4 +1,4 @@
-const { normalizeSerial, cleanText } = require("../utils/validate");
+const { normalizeSerial, toDocId, fromDocId, SERIAL_DOC_PREFIX, cleanText } = require("../utils/validate");
 const { COLLECTION } = require("./products");
 
 const MAX_CREATE = 1000; // products created in one request
@@ -61,7 +61,7 @@ function createQrService({ db, getHasher, getBaseUrl, loadQrLib }) {
         valid.slice(i, i + 20).map(async ({ serial, name }) => {
           try {
             // create() fails when the document exists, so an existing product is never overwritten
-            await col().doc(serial).create({
+            await col().doc(toDocId(serial)).create({
               serialNumber: serial,
               productName: name,
               isRegistered: false,
@@ -87,7 +87,8 @@ function createQrService({ db, getHasher, getBaseUrl, loadQrLib }) {
 
     let query = col();
     if (cleanPrefix) {
-      query = query.where("__name__", ">=", cleanPrefix).where("__name__", "<", `${cleanPrefix}\uf8ff`);
+      const idPrefix = `${SERIAL_DOC_PREFIX}${cleanPrefix}`; // document ids start with "SN:"
+      query = query.where("__name__", ">=", idPrefix).where("__name__", "<", `${idPrefix}\uf8ff`);
     }
     const snap = await query.limit(SCAN_LIMIT).get();
 
@@ -99,13 +100,13 @@ function createQrService({ db, getHasher, getBaseUrl, loadQrLib }) {
         const data = doc.data();
         let hash = data.qrHash;
         if (!hash) {
-          hash = hasher.hashFor(doc.id); // older products get their hash the first time they are listed
+          hash = hasher.hashFor(fromDocId(doc.id)); // older products get their hash the first time they are listed
           await doc.ref.update({ qrHash: hash });
         }
         const url = linkFor(hash);
         const svg = await lib.toString(url, { type: "svg", margin: 1, errorCorrectionLevel: "M" });
         return {
-          serialNumber: data.serialNumber || doc.id,
+          serialNumber: fromDocId(data.serialNumber) || fromDocId(doc.id),
           productName: data.productName || "",
           isRegistered: data.isRegistered === true,
           url,
@@ -122,13 +123,13 @@ function createQrService({ db, getHasher, getBaseUrl, loadQrLib }) {
     if (!serial) throw new AdminError(400, "INVALID_SERIAL", "Invalid serial number.");
 
     const hasher = getHasher();
-    const doc = await col().doc(serial).get();
+    const doc = await col().doc(toDocId(serial)).get();
     if (!doc.exists) throw new AdminError(404, "SERIAL_NOT_FOUND", "Product not found.");
 
     let hash = doc.data().qrHash;
     if (!hash) {
       hash = hasher.hashFor(serial);
-      await col().doc(serial).update({ qrHash: hash });
+      await col().doc(toDocId(serial)).update({ qrHash: hash });
     }
     const url = linkFor(hash);
     const lib = qrLib();

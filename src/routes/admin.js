@@ -121,7 +121,7 @@ function createAdminRouter({ qr, getAdminKey }) {
   router.get(
     "/api/admin/qr/:file",
     handle(async (req, res) => {
-      const match = /^([A-Za-z0-9_-]+)\.(png|svg)$/.exec(req.params.file || "");
+      const match = /^([A-Za-z0-9_:-]+)\.(png|svg)$/.exec(req.params.file || "");
       if (!match) throw new AdminError(400, "INVALID_FILE", "Use /api/admin/qr/<serial>.png or .svg");
       const image = await qr.image(match[1], match[2], req.query.size);
       res.set({ "Content-Type": image.contentType, "Cache-Control": "no-store" });
