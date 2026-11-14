@@ -31,7 +31,11 @@ function createProductStore(db) {
     if (snap.exists) return { docRef: prefixed, snap };
     const plain = plainRef(serial);
     const snap2 = await (reader || plain).get(...(reader ? [plain] : []));
-    return snap2.exists ? { docRef: plain, snap: snap2 } : { docRef: prefixed, snap };
+    if (snap2.exists) return { docRef: plain, snap: snap2 };
+    // Documents saved with a lower-case id (ml81101843)
+    const lower = db.collection(COLLECTION).doc(normalizeSerial(serial).toLowerCase());
+    const snap3 = await (reader || lower).get(...(reader ? [lower] : []));
+    return snap3.exists ? { docRef: lower, snap: snap3 } : { docRef: prefixed, snap };
   }
 
   /** Public view of a product. Never exposes the customer's personal details. */
