@@ -17,6 +17,10 @@ const { createQrHasher } = require("./utils/qrHash");
 const PRIVATE_ORIGIN =
   /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|[a-z0-9-]+\.local)(:\d{1,5})?$/i;
 
+// Websites that may ALWAYS call this API from a browser, whatever FRONTEND_URLS / FRONTEND_PUBLIC_URL say on the server.
+// (the www / non-www twin of each address is added automatically; localhost is always allowed)
+const ALWAYS_ALLOWED_ORIGINS = ["https://knownyoudyrect.co"];
+
 // This computer itself, on any port. The API sends no cookies, so this is safe in production too and it means
 // "npm run dev" on your own machine keeps working even when the .env file is the production one.
 const LOCALHOST_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d{1,5})?$/i;
@@ -90,7 +94,7 @@ function createApp({ db, sms, mailer, allowedOrigins = [], allowLanOrigins = fal
   });
 
   // The website address used in the emails is a website that must be allowed to call the API as well
-  const allowedSet = buildOriginSet([...allowedOrigins, process.env.FRONTEND_PUBLIC_URL].filter(Boolean));
+  const allowedSet = buildOriginSet([...ALWAYS_ALLOWED_ORIGINS, ...allowedOrigins, process.env.FRONTEND_PUBLIC_URL].filter(Boolean));
   console.log(
     `CORS: allowed websites = ${allowedSet.size ? [...allowedSet].join(", ") : "everyone"}; localhost is always allowed`
   );

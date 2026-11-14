@@ -79,7 +79,16 @@ function checkConfig(config) {
 }
 
 function createMailer({ feedbackTo, incidentTo, transport, company = {} } = {}) {
-  const companyInfo = { ...DEFAULT_COMPANY, ...Object.fromEntries(Object.entries(company).filter(([, v]) => v)) };
+  // Priority: values passed in by the server > environment variables > built-in defaults.
+  // "Access Your Account" opens the Sign In (login) page of the website: ACCOUNT_URL, or <FRONTEND_PUBLIC_URL>/signin.
+  const frontendUrl = clean(process.env.FRONTEND_PUBLIC_URL).replace(/\/+$/, "");
+  const fromEnv = {
+    supportEmail: clean(process.env.SUPPORT_EMAIL),
+    supportPhone: clean(process.env.SUPPORT_PHONE),
+    accountUrl: clean(process.env.ACCOUNT_URL) || (frontendUrl ? `${frontendUrl}/signin` : ""),
+  };
+  const notEmpty = (obj) => Object.fromEntries(Object.entries(obj).filter(([, v]) => v));
+  const companyInfo = { ...DEFAULT_COMPANY, ...notEmpty(fromEnv), ...notEmpty(company) };
   const config = readBrevoConfig();
   const transporter = transport || (config.apiKey ? createBrevoTransport(config.apiKey) : null);
 
