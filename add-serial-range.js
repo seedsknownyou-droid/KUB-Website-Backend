@@ -10,15 +10,14 @@ initializeApp({
 const db = getFirestore();
 
 // Serial Number Range
-const prefix = "SN:PRI0";
-const start = 1331001;
-const end = 1331005;
+const prefix = "MI";
+const start = 81105001;
+const end = 81105005;
 
 async function addSerialNumbers() {
     try {
         const batch = db.batch();
 
-        // Check existing documents
         const serialNumbers = [];
 
         for (let i = start; i <= end; i++) {

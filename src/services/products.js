@@ -1,4 +1,4 @@
-const { toIso, toDocId, fromDocId } = require("../utils/validate");
+const { toIso, toDocId, fromDocId, normalizeSerial } = require("../utils/validate");
 
 const COLLECTION = "qr_codes";
 
@@ -15,6 +15,25 @@ function createProductStore(db) {
     return db.collection(COLLECTION).doc(docId);
   };
 
+  /**
+   * Some documents were created by hand in the Firebase console with the plain serial as id (ML81101844),
+   * others by the admin panel with the "SN:" prefix (SN:PRI01331001). Look for both.
+   */
+  const plainRef = (serial) => {
+    const plain = normalizeSerial(serial);
+    if (!plain) throw new Error(`Invalid serial number: ${String(serial).slice(0, 40)}`);
+    return db.collection(COLLECTION).doc(plain);
+  };
+
+  async function resolveRef(serial, reader) {
+    const prefixed = ref(serial);
+    const snap = await (reader || prefixed).get(...(reader ? [prefixed] : []));
+    if (snap.exists) return { docRef: prefixed, snap };
+    const plain = plainRef(serial);
+    const snap2 = await (reader || plain).get(...(reader ? [plain] : []));
+    return snap2.exists ? { docRef: plain, snap: snap2 } : { docRef: prefixed, snap };
+  }
+
   /** Public view of a product. Never exposes the customer's personal details. */
   function toPublic(serial, data) {
     return {
@@ -26,7 +45,7 @@ function createProductStore(db) {
   }
 
   async function find(serial) {
-    const snap = await ref(serial).get();
+    const { snap } = await resolveRef(serial);
     return snap.exists ? snap.data() : null;
   }
 
@@ -45,8 +64,7 @@ function createProductStore(db) {
    */
   async function register(serial, customer) {
     return db.runTransaction(async (tx) => {
-      const docRef = ref(serial);
-      const snap = await tx.get(docRef);
+      const { docRef, snap } = await resolveRef(serial, tx);
 
       if (!snap.exists) return { status: "not_found" };
 
@@ -106,7 +124,8 @@ function createProductStore(db) {
   /** Stores the outcome of the SMS / email so failed notifications can be followed up. */
   async function saveNotificationStatus(serial, notifications) {
     try {
-      await ref(serial).update({ notifications });
+      const { docRef } = await resolveRef(serial);
+      await docRef.update({ notifications });
     } catch (err) {
       console.error("Could not save notification status:", err.message);
     }
